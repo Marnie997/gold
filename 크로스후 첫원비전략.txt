@@ -960,25 +960,25 @@ if canRearm
 // =====================================================
 // A모드 / 예외모드
 // [핵심 수정]
-// 적격 원비(eligible): 박스 조건까지 통과한 원비만 카운트/봉 잠금
-// 박스 밖 원비는 카운트 안 먹음 → A모드 소진 방지
-// 적격 원비 3번 내에 진입 못하면 → A모드 종료 → B모드
+// 원비는 골크/데크 후 전체 카운트 (박스 안팎 무관)
+// 진입은 박스 밖일 때만 실행
+// 카운트 3번 내에 박스 밖 진입 못하면 → A모드 종료 → B모드
 // =====================================================
 if canRearm and (engineMode == 1 or engineMode == 2)
     allowedCount = engineMode == 1 ? maxRegularOnebi : maxReverseOnebi
 
     // ── 롱 ──
     if engineDir == 1 and cycleState == 1
-        // 적격 원비: 박스 조건까지 통과한 원비만 카운트/봉 잠금
-        longEligibleOnebi = buyCondition1 and isAboveTodayBox() and (na(lastLongOnebiBar) or bar_index > lastLongOnebiBar)
+        // 원비 raw 신호 감지 (박스 조건 무관하게 카운트)
+        longOnebiRaw = buyCondition1 and (na(lastLongOnebiBar) or bar_index > lastLongOnebiBar)
 
-        if longEligibleOnebi
+        if longOnebiRaw
             lastLongOnebiBar := bar_index
             setupCount       += 1
             longOnebiCount   := setupCount
 
-            // 카운트 범위 내이면 → 진입
-            if setupCount <= allowedCount and ktrReady and canEnterNewFlatPosition
+            // 카운트 범위 내이고 + 박스 밖이면 → 진입
+            if setupCount <= allowedCount and isAboveTodayBox() and ktrReady and canEnterNewFlatPosition
                 setupKtr         := activeKtr
                 entryRiskPctUsed := getEntryRiskPct(1)
                 entryRiskUsdUsed := getEntryRiskUsd(1)
@@ -1006,16 +1006,16 @@ if canRearm and (engineMode == 1 or engineMode == 2)
 
     // ── 숏 ──
     if engineDir == -1 and cycleState == -1
-        // 적격 원비: 박스 조건까지 통과한 원비만 카운트/봉 잠금
-        shortEligibleOnebi = sellCondition1 and isBelowTodayBox() and (na(lastShortOnebiBar) or bar_index > lastShortOnebiBar)
+        // 원비 raw 신호 감지 (박스 조건 무관하게 카운트)
+        shortOnebiRaw = sellCondition1 and (na(lastShortOnebiBar) or bar_index > lastShortOnebiBar)
 
-        if shortEligibleOnebi
+        if shortOnebiRaw
             lastShortOnebiBar := bar_index
             setupCount        += 1
             shortOnebiCount   := setupCount
 
-            // 카운트 범위 내이면 → 진입
-            if setupCount <= allowedCount and ktrReady and canEnterNewFlatPosition
+            // 카운트 범위 내이고 + 박스 밖이면 → 진입
+            if setupCount <= allowedCount and isBelowTodayBox() and ktrReady and canEnterNewFlatPosition
                 setupKtr         := activeKtr
                 entryRiskPctUsed := getEntryRiskPct(-1)
                 entryRiskUsdUsed := getEntryRiskUsd(-1)
