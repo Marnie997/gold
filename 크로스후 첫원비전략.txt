@@ -1,0 +1,1210 @@
+//@version=5
+strategy("럭셜마린더블비 KTR 크로스후 첫원비 전략 v2 구간매매", overlay=true, pyramiding=6, initial_capital=10000, calc_on_every_tick=true, calc_on_order_fills=true, process_orders_on_close=false, use_bar_magnifier=true, commission_type=strategy.commission.percent, commission_value=0.0)
+// =====================================================
+// 전략 입력값
+// =====================================================
+capitalUsd  = input.float(10000, "계산용 시드", minval=1, group="전략")
+riskPct     = input.float(10.0, "리스크 %", minval=0.1, step=0.1, group="전략")
+useHtfRiskFilter = input.bool(true, "1시간 역추세 리스크 축소 사용", group="전략")
+counterRiskPct  = input.float(5.0, "1시간 역추세 리스크 %", minval=0.1, step=0.1, group="전략")
+pointValue  = input.float(1.0, "1랏당 1포인트 손익값", minval=0.0001, step=0.0001, group="전략")
+ktrTf       = input.string("5", "사용할 KTR TF", options=["60", "10", "5", "2"], group="전략")
+maxAddStep  = input.int(5, "최대 추가구간", minval=1, maxval=5, group="전략")
+useReverseCleanup = input.bool(true, "반대방향정리 사용", group="전략")
+showLevels  = input.bool(true,  "체결 중 레벨 표시", group="전략")
+showLabels  = input.bool(true,  "체결 라벨 표시", group="전략")
+showDebug   = input.bool(false, "디버그 표시", group="전략")
+
+selectedStopKtr = maxAddStep + 0.5
+
+// =====================================================
+// 계단식 시드 관리
+// =====================================================
+getSteppedCapital(_equity) =>
+    float out = na
+    if _equity >= 10000
+        out := math.floor(_equity / 5000.0) * 5000.0
+    else
+        out := math.floor(_equity / 1000.0) * 1000.0
+    math.max(out, 1000.0)
+
+equityForSizing = capitalUsd + strategy.netprofit
+steppedCapital = getSteppedCapital(equityForSizing)
+riskUsdLive = steppedCapital * riskPct * 0.01
+
+// =====================================================
+// 더블비 정리본 표시부
+// =====================================================
+
+// 20,2 open
+bbLength1 = 20
+bbStdDev1 = 2.0
+bbMiddle1 = ta.sma(open, bbLength1)
+bbUpper1  = bbMiddle1 + bbStdDev1 * ta.stdev(open, bbLength1)
+bbLower1  = bbMiddle1 - bbStdDev1 * ta.stdev(open, bbLength1)
+
+// 20,2 close
+bbLength2 = 20
+bbStdDev2 = 2.0
+bbMiddle2 = ta.sma(close, bbLength2)
+bbUpper2  = bbMiddle2 + bbStdDev2 * ta.stdev(close, bbLength2)
+bbLower2  = bbMiddle2 - bbStdDev2 * ta.stdev(close, bbLength2)
+
+// 4,4 open
+bbLength3 = 4
+bbStdDev3 = 4.0
+bbMiddle3 = ta.sma(open, bbLength3)
+bbUpper3  = bbMiddle3 + bbStdDev3 * ta.stdev(open, bbLength3)
+bbLower3  = bbMiddle3 - bbStdDev3 * ta.stdev(open, bbLength3)
+
+// 4,4 close
+bbLength4 = 4
+bbStdDev4 = 4.0
+bbMiddle4 = ta.sma(close, bbLength4)
+bbUpper4  = bbMiddle4 + bbStdDev4 * ta.stdev(close, bbLength4)
+bbLower4  = bbMiddle4 - bbStdDev4 * ta.stdev(close, bbLength4)
+
+plot(bbUpper1, title="Bollinger Upper Band (20,2)", color=color.rgb(255, 255, 255), linewidth=2)
+plot(bbLower1, title="Bollinger Lower Band (20,2)", color=color.rgb(255, 255, 255), linewidth=2)
+plot(bbUpper2, title="(20,2) Upper Band 미리보기", color=color.new(#f4f3ed, 40), linewidth=1, offset=1)
+plot(bbLower2, title="(20,2) Lower Band 미리보기", color=color.new(#f4f3ed, 40), linewidth=1, offset=1)
+
+plot(bbUpper3, title="Bollinger Upper Band (4,4)", color=color.rgb(5, 126, 100), linewidth=1)
+plot(bbLower3, title="Bollinger Lower Band (4,4)", color=color.rgb(5, 126, 100), linewidth=1)
+plot(bbLower4, title="(4,4) Lower Band 미리보기", color=color.new(#057e4b, 42), linewidth=1, offset=1)
+plot(bbUpper4, title="(4,4) Upper Band 미리보기", color=color.new(#057e4b, 42), linewidth=1, offset=1)
+
+// 20 / 120
+ma20  = ta.sma(close, 20)
+ma120 = ta.sma(close, 120)
+plot(ma20,  title="20-Period Moving Average",  color=color.green, linewidth=2)
+plot(ma120, title="120-Period Moving Average", color=color.rgb(247, 109, 17), linewidth=2)
+
+// 1시간 추세 기준 리스크 필터
+htfMa20  = request.security(syminfo.tickerid, "60", ta.sma(close, 20), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htfMa120 = request.security(syminfo.tickerid, "60", ta.sma(close, 120), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htfTrendDir = htfMa20 > htfMa120 ? 1 : htfMa20 < htfMa120 ? -1 : 0
+
+getEntryRiskPct(_entryDir) =>
+    bool isCounterTrend = htfTrendDir != 0 and _entryDir != htfTrendDir
+    useHtfRiskFilter and isCounterTrend ? counterRiskPct : riskPct
+
+getEntryRiskUsd(_entryDir) =>
+    steppedCapital * getEntryRiskPct(_entryDir) * 0.01
+
+// WMA
+len11 = input.int(4, minval=1, title="WMA1")
+src11 = input.source(open, title="WMA1 Type")
+out11 = ta.wma(src11, len11)
+
+len1  = input.int(4, minval=1, title="WMA1 오프셋")
+src1  = input.source(close, title="WMA1 오프셋 Type")
+out1  = ta.wma(src1, len1)
+
+plot(out11, title="WMA1", color=#00bcd4, linewidth=2)
+plot(out1,  title="WMA1 미리보기", color=color.new(#00bcd4, 40), offset=1)
+
+len12 = input.int(17, minval=1, title="WMA2")
+src12 = input.source(open, title="WMA2 Type")
+out12 = ta.wma(src12, len12)
+
+len2  = input.int(17, minval=1, title="WMA2 오프셋")
+src2  = input.source(close, title="WMA2 오프셋 Type")
+out2  = ta.wma(src2, len2)
+
+plot(out12, title="WMA2", color=#ffeb3b, linewidth=2)
+plot(out2,  title="WMA2 미리보기", color=color.new(#ffeb3b, 40), offset=1)
+
+// 원비 / 더블비
+[_, bbUpper11, bbLower11] = ta.bb(close, 20, 2)
+[_, bbUpper12, bbLower12] = ta.bb(open, 4, 4)
+
+bodyTop    = math.max(open, close)
+bodyBottom = math.min(open, close)
+
+sellCondition = (high >= bbUpper11) and (high >= bbUpper12)
+buyCondition  = (low <= bbLower11) and (low <= bbLower12)
+
+sellCondition1 = (high >= bbUpper12)
+buyCondition1  = (low <= bbLower12)
+
+plotshape(series=sellCondition,  title="더블비 매도", location=location.abovebar, color=#e60c20, text="DS", textcolor=color.white, style=shape.triangledown, size=size.tiny)
+plotshape(series=buyCondition,   title="더블비 매수", location=location.belowbar, color=#40cd46, text="DB", textcolor=color.white, style=shape.triangleup,   size=size.tiny)
+plotshape(series=sellCondition1, title="원비 매도",  location=location.abovebar, color=#e60c20, style=shape.triangledown, size=size.tiny)
+plotshape(series=buyCondition1,  title="원비 매수",  location=location.belowbar, color=#40cd46, style=shape.triangleup,   size=size.tiny)
+
+// 반전형
+Upsignal = open[1] > close[1] and close > open and close >= open[1] and close[1] >= open and (close - open > open[1] - close[1])
+Dnsignal = close[1] > open[1] and open > close and open >= close[1] and open[1] >= close and (open - close > close[1] - open[1])
+
+barcolor(Upsignal ? color.rgb(238, 255, 0, 20) : na)
+barcolor(Dnsignal ? color.rgb(125, 3, 129, 20) : na)
+
+// =====================================================
+// KTR 세션 계산
+// =====================================================
+nthSundayOfMonth(_year, _month, _nth, _tz) =>
+    first_ts  = timestamp(_tz, _year, _month, 1, 0, 0)
+    first_dow = dayofweek(first_ts)
+    offset    = (dayofweek.sunday - first_dow + 7) % 7
+    1 + offset + (_nth - 1) * 7
+
+lastSundayOfMonth(_year, _month, _tz) =>
+    next_month_ts = _month == 12 ? timestamp(_tz, _year + 1, 1, 1, 0, 0) : timestamp(_tz, _year, _month + 1, 1, 1, 0, 0)
+    last_day_ts   = next_month_ts - 24 * 60 * 60 * 1000
+    last_day_num  = dayofmonth(last_day_ts, _tz)
+    last_dow      = dayofweek(last_day_ts)
+    offset        = (last_dow - dayofweek.sunday + 7) % 7
+    last_day_num - offset
+
+isUSDST() =>
+    y         = year(time, "America/New_York")
+    start_day = nthSundayOfMonth(y, 3, 2, "America/New_York")
+    end_day   = nthSundayOfMonth(y, 11, 1, "America/New_York")
+    start_ts  = timestamp("America/New_York", y, 3, start_day, 2, 0)
+    end_ts    = timestamp("America/New_York", y, 11, end_day, 2, 0)
+    time >= start_ts and time < end_ts
+
+isEuroDST() =>
+    y         = year(time, "Europe/Berlin")
+    start_day = lastSundayOfMonth(y, 3, "Europe/Berlin")
+    end_day   = lastSundayOfMonth(y, 10, "Europe/Berlin")
+    start_ts  = timestamp("Europe/Berlin", y, 3, start_day, 2, 0)
+    end_ts    = timestamp("Europe/Berlin", y, 10, end_day, 3, 0)
+    time >= start_ts and time < end_ts
+
+us_dst   = isUSDST()
+euro_dst = isEuroDST()
+
+asia_h   = us_dst ? 7 : 8
+asia_m   = 0
+euro_h   = euro_dst ? 16 : 17
+euro_m   = 0
+us_1h_h  = us_dst ? 22 : 23
+us_1h_m  = 0
+us_sub_h = us_dst ? 22 : 23
+us_sub_m = 30
+
+sessionStartTs(_h, _m) =>
+    timestamp("GMT+9", year(time, "GMT+9"), month(time, "GMT+9"), dayofmonth(time, "GMT+9"), _h, _m)
+
+isFirstBarAfterSession(_h, _m) =>
+    sess = sessionStartTs(_h, _m)
+    time >= sess and (na(time[1]) or time[1] < sess)
+
+inAsiaSession() =>
+    curMin    = hour(time, "GMT+9") * 60 + minute(time, "GMT+9")
+    asiaStart = asia_h * 60 + asia_m
+    euroStart = (euro_dst ? 16 : 17) * 60
+    curMin >= asiaStart and curMin < euroStart
+
+inEuroSession() =>
+    curMin    = hour(time, "GMT+9") * 60 + minute(time, "GMT+9")
+    euroStart = (euro_dst ? 16 : 17) * 60
+    usStart   = (us_dst ? 22 : 23) * 60 + 30
+    curMin >= euroStart and curMin < usStart
+
+inUSSession() =>
+    curMin  = hour(time, "GMT+9") * 60 + minute(time, "GMT+9")
+    usStart = (us_dst ? 22 : 23) * 60 + 30
+    curMin >= usStart or curMin < (asia_h * 60 + asia_m)
+
+combineTwoBarRange(_prevHigh, _prevLow, _currHigh, _currLow) =>
+    float out = na
+    if na(_prevHigh) or na(_prevLow) or na(_currHigh) or na(_currLow)
+        out := na
+    else
+        out := math.max(_prevHigh, _currHigh) - math.min(_prevLow, _currLow)
+    out
+
+getAsiaComposite(_tf, _sessionH, _sessionM) =>
+    request.security(
+         syminfo.tickerid,
+         _tf,
+         ta.valuewhen(
+             barstate.isconfirmed and isFirstBarAfterSession(_sessionH, _sessionM) and not na(high[1]) and not na(low[1]),
+             combineTwoBarRange(high[1], low[1], high, low),
+             0
+         ),
+         gaps = barmerge.gaps_off,
+         lookahead = barmerge.lookahead_off
+     )
+
+getOpenBarRange(_tf, _sessionH, _sessionM) =>
+    request.security(
+         syminfo.tickerid,
+         _tf,
+         ta.valuewhen(
+             barstate.isconfirmed and isFirstBarAfterSession(_sessionH, _sessionM),
+             high - low,
+             0
+         ),
+         gaps = barmerge.gaps_off,
+         lookahead = barmerge.lookahead_off
+     )
+
+asia_1h = getAsiaComposite("60", asia_h, asia_m)
+asia_10 = getAsiaComposite("10", asia_h, asia_m)
+asia_5  = getAsiaComposite("5",  asia_h, asia_m)
+asia_2  = getAsiaComposite("2",  asia_h, asia_m)
+
+euro_1h = getOpenBarRange("60", euro_h, euro_m)
+euro_10 = getOpenBarRange("10", euro_h, euro_m)
+euro_5  = getOpenBarRange("5",  euro_h, euro_m)
+euro_2  = getOpenBarRange("2",  euro_h, euro_m)
+
+us_1h = getOpenBarRange("60", us_1h_h, us_1h_m)
+us_10 = getOpenBarRange("10", us_sub_h, us_sub_m)
+us_5  = getOpenBarRange("5",  us_sub_h, us_sub_m)
+us_2  = getOpenBarRange("2",  us_sub_h, us_sub_m)
+
+getActiveKtr() =>
+    float k = na
+    if ktrTf == "60"
+        k := inAsiaSession() ? asia_1h : inEuroSession() ? euro_1h : us_1h
+    else if ktrTf == "10"
+        k := inAsiaSession() ? asia_10 : inEuroSession() ? euro_10 : us_10
+    else if ktrTf == "5"
+        k := inAsiaSession() ? asia_5 : inEuroSession() ? euro_5 : us_5
+    else
+        k := inAsiaSession() ? asia_2 : inEuroSession() ? euro_2 : us_2
+    k
+
+activeKtr = getActiveKtr()
+ktrReady  = not na(activeKtr) and activeKtr > 0
+
+getCurrentSessionType() =>
+    inAsiaSession() ? 1 : inEuroSession() ? 2 : 3
+
+tpKtrMult = input.int(3, "1구간 익절 KTR 배수", minval=1, maxval=5, group="전략")
+
+// =====================================================
+// 상태머신
+// 0  = 대기
+// 1  = 롱 대기
+// -1 = 숏 대기
+// 2  = 롱 주문 체결 대기
+// -2 = 숏 주문 체결 대기
+// 3  = 롱 거래 진행중
+// -3 = 숏 거래 진행중
+// =====================================================
+
+useFlatEntryBlock = input.bool(true, "무포지션 신규 금지 시간 사용", group="시간필터")
+useEuro1KtrFilter = input.bool(true, "1번필터 유로장 1KTR 익절", group="시간필터")
+
+showAsiaOpenBox = input.bool(true, "아시아 첫 1시간 박스 표시", group="박스")
+
+goldenCross = ta.crossover(ma20, ma120)
+deadCross   = ta.crossunder(ma20, ma120)
+
+maxRegularOnebi = 3
+maxReverseOnebi = 2
+
+getModeName(_mode) =>
+    _mode == 1 ? "정규모드" :
+     _mode == 2 ? "반대예외" :
+     _mode == 3 ? "B모드" : "모드없음"
+
+getDirName(_dir) =>
+    _dir == 1 ? "롱" :
+     _dir == -1 ? "숏" : "없음"
+
+// =====================================================
+// 전구간 총리스크 기준 동일손실 랏수 계산
+// =====================================================
+calcRiskSplitQtys(_riskUsd, _setupKtr, _pointValue, _maxAddStep, _selectedStopKtr) =>
+    float _q1 = na
+    float _q2 = na
+    float _q3 = na
+    float _q4 = na
+    float _q5 = na
+    float _q6 = na
+
+    bool _ready = not na(_riskUsd) and _riskUsd > 0 and not na(_setupKtr) and _setupKtr > 0 and _pointValue > 0
+    if _ready
+        float _totalSteps  = _maxAddStep + 1.0
+        float _perStepRisk = _riskUsd / _totalSteps
+
+        _q1 := _perStepRisk / (_selectedStopKtr * _setupKtr * _pointValue)
+        _q2 := _maxAddStep >= 1 ? _perStepRisk / ((_selectedStopKtr - 1.0) * _setupKtr * _pointValue) : na
+        _q3 := _maxAddStep >= 2 ? _perStepRisk / ((_selectedStopKtr - 2.0) * _setupKtr * _pointValue) : na
+        _q4 := _maxAddStep >= 3 ? _perStepRisk / ((_selectedStopKtr - 3.0) * _setupKtr * _pointValue) : na
+        _q5 := _maxAddStep >= 4 ? _perStepRisk / ((_selectedStopKtr - 4.0) * _setupKtr * _pointValue) : na
+        _q6 := _maxAddStep >= 5 ? _perStepRisk / ((_selectedStopKtr - 5.0) * _setupKtr * _pointValue) : na
+
+    [_q1, _q2, _q3, _q4, _q5, _q6]
+
+// =====================================================
+// 상태 변수
+// =====================================================
+var int cycleState         = 0
+var int crossBar           = na
+var int justClosedBar      = na
+var int filledSteps        = 0
+var int lastFillBar        = na
+
+var int engineMode         = 0
+var int engineDir          = 0
+var int lastCrossDir       = 0
+var int setupCount         = 0
+var int activeTradeMode    = 0
+var int activeTradeDir     = 0
+var int activeTradeSession = 0
+
+var int longOnebiCount     = 0
+var int shortOnebiCount    = 0
+var int lastLongOnebiBar   = na
+var int lastShortOnebiBar  = na
+
+var float setupKtr         = na
+var float qty1             = na
+var float qty2             = na
+var float qty3             = na
+var float qty4             = na
+var float qty5             = na
+var float qty6             = na
+var float entryRiskUsdUsed = na
+var float entryRiskPctUsed = na
+var float basePrice        = na
+var float stopPrice        = na
+var float tpPrice          = na
+var float entry1Price      = na
+var float entry2Price      = na
+var float entry3Price      = na
+var float entry4Price      = na
+var float entry5Price      = na
+var float entry6Price      = na
+
+var bool step2Placed       = false
+var bool step3Placed       = false
+var bool step4Placed       = false
+var bool step5Placed       = false
+var bool step6Placed       = false
+
+var string activeSide         = ""
+var int reverseArm            = 0
+var int reverseCrossBar       = na
+var bool defenseMode          = false
+var bool forceCloseIssued     = false
+var string pendingCloseReason = ""
+
+var int reverseNextDir = 0
+var int reverseSeedBar = na
+
+var bool bUsedTodayLong  = false
+var bool bUsedTodayShort = false
+var bool bBreakArmed     = false
+var int  bBreakDir       = 0
+var int  bBreakBar       = na
+
+// =====================================================
+// 무포지션 신규진입 금지시간
+// =====================================================
+curBlockMin             = hour(time, "GMT+9") * 60 + minute(time, "GMT+9")
+blockStartHour          = us_sub_h - 1
+blockStartTotal         = blockStartHour * 60
+blockEndTotal           = blockStartTotal + 120
+
+inFlatEntryBlock        = useFlatEntryBlock ? (curBlockMin >= blockStartTotal and curBlockMin < blockEndTotal) : false
+isFlatNow               = strategy.position_size == 0 and strategy.opentrades == 0
+canEnterNewFlatPosition = not (isFlatNow and inFlatEntryBlock)
+
+getLongStepPrice(_step) =>
+    _step == 1 ? entry1Price :
+     _step == 2 ? entry2Price :
+     _step == 3 ? entry3Price :
+     _step == 4 ? entry4Price :
+     _step == 5 ? entry5Price :
+     _step == 6 ? entry6Price : na
+
+getShortStepPrice(_step) =>
+    _step == 1 ? entry1Price :
+     _step == 2 ? entry2Price :
+     _step == 3 ? entry3Price :
+     _step == 4 ? entry4Price :
+     _step == 5 ? entry5Price :
+     _step == 6 ? entry6Price : na
+
+getSingleLongTp(_base, _ktr) =>
+    isEuroSessionTrade = activeTradeSession == 2
+    tpMult             = isEuroSessionTrade ? (useEuro1KtrFilter ? 1.0 : 3.0) : tpKtrMult
+    _base + _ktr * tpMult
+
+getSingleShortTp(_base, _ktr) =>
+    isEuroSessionTrade = activeTradeSession == 2
+    tpMult             = isEuroSessionTrade ? (useEuro1KtrFilter ? 1.0 : 3.0) : tpKtrMult
+    _base - _ktr * tpMult
+
+// =====================================================
+// 아시아 시가 박스
+// =====================================================
+asiaBoxHour = asia_h
+
+oandaCurMinKst  = hour(time, "GMT+9") * 60 + minute(time, "GMT+9")
+sessionStartMin = asiaBoxHour * 60
+sessionEndMin   = (asiaBoxHour + 23) % 24 * 60 + 59
+
+inOandaSession  = oandaCurMinKst >= sessionStartMin or oandaCurMinKst <= sessionEndMin
+sessionAnchorTs = oandaCurMinKst >= sessionStartMin ? time : time - 24 * 60 * 60 * 1000
+
+getDayKey(_ts) =>
+    year(_ts, "GMT+9") * 10000 + month(_ts, "GMT+9") * 100 + dayofmonth(_ts, "GMT+9")
+
+getAsiaSessionStartTs(_anchorTs) =>
+    timestamp("GMT+9", year(_anchorTs, "GMT+9"), month(_anchorTs, "GMT+9"), dayofmonth(_anchorTs, "GMT+9"), asiaBoxHour, 0)
+
+sessionKey         = getDayKey(sessionAnchorTs)
+curSessionStartTs  = getAsiaSessionStartTs(sessionAnchorTs)
+nextSessionStartTs = curSessionStartTs + 24 * 60 * 60 * 1000
+firstHourEndTs     = curSessionStartTs + 60 * 60 * 1000
+
+var float todayBoxTop         = na
+var float todayBoxBottom      = na
+var int   todayBoxLeftTime    = na
+var bool  boxReady            = false
+var int   activeBoxSessionKey = na
+var int   prevSessionKey      = na
+var box[] asiaBoxArr          = array.new_box()
+
+var bool  boxBuilding         = false
+var float buildHigh           = na
+var float buildLow            = na
+var int   buildSessionKey     = na
+var int   buildStartTs        = na
+var int   buildEndTs          = na
+
+newSession = na(prevSessionKey) or sessionKey != prevSessionKey
+firstBarAfterSessionStart = time >= curSessionStartTs and (na(time[1]) or time[1] < curSessionStartTs)
+
+if newSession
+    if array.size(asiaBoxArr) > 0
+        prevBox = array.get(asiaBoxArr, array.size(asiaBoxArr) - 1)
+        box.set_right(prevBox, curSessionStartTs)
+
+    prevSessionKey := sessionKey
+
+    boxReady            := false
+    todayBoxTop         := na
+    todayBoxBottom      := na
+    todayBoxLeftTime    := na
+    activeBoxSessionKey := na
+
+    boxBuilding         := false
+    buildHigh           := na
+    buildLow            := na
+    buildSessionKey     := na
+    buildStartTs        := na
+    buildEndTs          := na
+
+    bUsedTodayLong  := false
+    bUsedTodayShort := false
+    bBreakArmed     := false
+    bBreakDir       := 0
+    bBreakBar       := na
+
+if firstBarAfterSessionStart
+    boxBuilding     := true
+    buildHigh       := high
+    buildLow        := low
+    buildSessionKey := sessionKey
+    buildStartTs    := curSessionStartTs
+    buildEndTs      := firstHourEndTs
+
+if boxBuilding and sessionKey == buildSessionKey and time < buildEndTs
+    buildHigh := math.max(buildHigh, high)
+    buildLow  := math.min(buildLow, low)
+
+if boxBuilding and sessionKey == buildSessionKey and time >= buildEndTs
+    todayBoxTop         := buildHigh
+    todayBoxBottom      := buildLow
+    todayBoxLeftTime    := buildStartTs
+    activeBoxSessionKey := buildSessionKey
+    boxReady            := true
+    boxBuilding         := false
+
+    newAsiaBox = box.new(
+         left         = todayBoxLeftTime,
+         top          = todayBoxTop,
+         right        = time,
+         bottom       = todayBoxBottom,
+         xloc         = xloc.bar_time,
+         border_color = color.new(color.aqua, 0),
+         bgcolor      = color.new(color.aqua, 88))
+
+    array.push(asiaBoxArr, newAsiaBox)
+
+boxCount = array.size(asiaBoxArr)
+
+if boxCount > 0
+    if showAsiaOpenBox
+        for i = 0 to boxCount - 1
+            bx = array.get(asiaBoxArr, i)
+            box.set_bgcolor(bx, color.new(color.aqua, 88))
+            box.set_border_color(bx, color.new(color.aqua, 0))
+    else
+        for i = 0 to boxCount - 1
+            bx = array.get(asiaBoxArr, i)
+            box.set_bgcolor(bx, color.new(color.aqua, 100))
+            box.set_border_color(bx, color.new(color.aqua, 100))
+
+    if boxReady and inOandaSession and activeBoxSessionKey == sessionKey
+        lastBox = array.get(asiaBoxArr, boxCount - 1)
+        liveRight = math.min(time, nextSessionStartTs)
+        box.set_right(lastBox, liveRight)
+
+isAboveTodayBox() =>
+    boxReady and inOandaSession and activeBoxSessionKey == sessionKey and not na(todayBoxTop) and close > todayBoxTop
+
+isBelowTodayBox() =>
+    boxReady and inOandaSession and activeBoxSessionKey == sessionKey and not na(todayBoxBottom) and close < todayBoxBottom
+
+boxUpBreak = boxReady and inOandaSession and activeBoxSessionKey == sessionKey and not na(todayBoxTop) and close > todayBoxTop and close[1] <= todayBoxTop
+boxDnBreak = boxReady and inOandaSession and activeBoxSessionKey == sessionKey and not na(todayBoxBottom) and close < todayBoxBottom and close[1] >= todayBoxBottom
+
+boxUpReady = boxUpBreak
+boxDnReady = boxDnBreak
+
+// =====================================================
+// 거래 종료 감지
+// =====================================================
+tradeWasOpen     = strategy.position_size[1] != 0 or strategy.opentrades[1] > 0
+tradeIsFlat      = strategy.position_size == 0 and strategy.opentrades == 0
+tradeFinishedNow = (cycleState == 3 or cycleState == -3 or cycleState == 2 or cycleState == -2) and tradeWasOpen and tradeIsFlat
+
+// =====================================================
+// 거래 종료 처리
+// =====================================================
+if tradeFinishedNow
+    lastClosedIdx = strategy.closedtrades > 0 ? strategy.closedtrades - 1 : na
+    exitPx        = na(lastClosedIdx) ? close : strategy.closedtrades.exit_price(lastClosedIdx)
+    tradePnL      = na(lastClosedIdx) ? 0.0 : strategy.closedtrades.profit(lastClosedIdx)
+    tickTol       = syminfo.mintick * 2.0
+
+    string exitType = "종료"
+    if pendingCloseReason != ""
+        exitType := pendingCloseReason
+    else if defenseMode and not na(tpPrice) and math.abs(exitPx - tpPrice) <= tickTol
+        exitType := "방어정리"
+    else if not na(stopPrice) and math.abs(exitPx - stopPrice) <= tickTol
+        exitType := "손절"
+    else if tradePnL > 0
+        exitType := "익절"
+    else if tradePnL < 0
+        exitType := "손절"
+
+    exitTitle     = activeSide == "LONG" ? "롱 정리" : activeSide == "SHORT" ? "숏 정리" : "정리"
+    exitY         = activeSide == "LONG" ? high : low
+    exitStyle     = activeSide == "LONG" ? label.style_label_down : label.style_label_up
+    exitColor     = exitType == "손절" ? color.red : exitType == "반대신호정리" ? color.orange : exitType == "방어정리" ? color.yellow : color.lime
+    exitTextColor = exitType == "손절" ? color.white : color.black
+
+    if showLabels
+        label.new(bar_index, exitY, exitTitle + "\n" + exitType + "\n청산가 " + str.tostring(exitPx, format.mintick), style=exitStyle, color=exitColor, textcolor=exitTextColor, size=size.small)
+
+    strategy.cancel("L2")
+    strategy.cancel("L3")
+    strategy.cancel("L4")
+    strategy.cancel("L5")
+    strategy.cancel("L6")
+    strategy.cancel("S2")
+    strategy.cancel("S3")
+    strategy.cancel("S4")
+    strategy.cancel("S5")
+    strategy.cancel("S6")
+
+    cycleState         := 0
+    justClosedBar      := bar_index
+    filledSteps        := 0
+    lastFillBar        := na
+    basePrice          := na
+    stopPrice          := na
+    tpPrice            := na
+    entry1Price        := na
+    entry2Price        := na
+    entry3Price        := na
+    entry4Price        := na
+    entry5Price        := na
+    entry6Price        := na
+    qty1               := na
+    qty2               := na
+    qty3               := na
+    qty4               := na
+    qty5               := na
+    qty6               := na
+    entryRiskUsdUsed   := na
+    entryRiskPctUsed   := na
+    step2Placed        := false
+    step3Placed        := false
+    step4Placed        := false
+    step5Placed        := false
+    step6Placed        := false
+    activeSide         := ""
+    reverseArm         := 0
+    reverseCrossBar    := na
+    defenseMode        := false
+    forceCloseIssued   := false
+    pendingCloseReason := ""
+
+    if exitType == "반대신호정리" and reverseNextDir != 0
+        engineMode := 2
+        engineDir  := reverseNextDir
+        setupCount := 0
+        crossBar   := reverseCrossBar
+        cycleState := reverseNextDir == 1 ? 1 : -1
+
+        if reverseNextDir == 1
+            longOnebiCount   := 0
+            lastLongOnebiBar := reverseSeedBar
+            shortOnebiCount  := 0
+        else
+            shortOnebiCount   := 0
+            lastShortOnebiBar := reverseSeedBar
+            longOnebiCount    := 0
+
+        reverseNextDir := 0
+        reverseSeedBar := na
+
+    else
+        if activeTradeMode == 1
+            if setupCount >= maxRegularOnebi
+                engineMode := 3
+            else
+                engineMode := 1
+            cycleState := engineDir == 1 ? 1 : -1
+
+        else if activeTradeMode == 2
+            if setupCount >= maxReverseOnebi
+                engineMode := 3
+            else
+                engineMode := 2
+            cycleState := engineDir == 1 ? 1 : -1
+
+        else if activeTradeMode == 3
+            engineMode := 3
+            cycleState := engineDir == 1 ? 1 : -1
+
+        activeTradeMode    := 0
+        activeTradeDir     := 0
+        activeTradeSession := 0
+
+// =====================================================
+// 거래중 반대 크로스 감시
+// =====================================================
+if useReverseCleanup and cycleState == 3
+    if deadCross and not defenseMode
+        defenseMode     := true
+        reverseArm      := -1
+        reverseCrossBar := bar_index
+        strategy.cancel("L2")
+        strategy.cancel("L3")
+        strategy.cancel("L4")
+        strategy.cancel("L5")
+        strategy.cancel("L6")
+
+    if defenseMode and reverseArm == -1 and bar_index > nz(reverseCrossBar, bar_index) and sellCondition1 and not forceCloseIssued
+        pendingCloseReason := "반대신호정리"
+        forceCloseIssued   := true
+        reverseNextDir     := -1
+        reverseSeedBar     := bar_index
+        strategy.cancel("L2")
+        strategy.cancel("L3")
+        strategy.cancel("L4")
+        strategy.cancel("L5")
+        strategy.cancel("L6")
+        strategy.close_all(comment="반대신호정리")
+
+if useReverseCleanup and cycleState == -3
+    if goldenCross and not defenseMode
+        defenseMode     := true
+        reverseArm      := 1
+        reverseCrossBar := bar_index
+        strategy.cancel("S2")
+        strategy.cancel("S3")
+        strategy.cancel("S4")
+        strategy.cancel("S5")
+        strategy.cancel("S6")
+
+    if defenseMode and reverseArm == 1 and bar_index > nz(reverseCrossBar, bar_index) and buyCondition1 and not forceCloseIssued
+        pendingCloseReason := "반대신호정리"
+        forceCloseIssued   := true
+        reverseNextDir     := 1
+        reverseSeedBar     := bar_index
+        strategy.cancel("S2")
+        strategy.cancel("S3")
+        strategy.cancel("S4")
+        strategy.cancel("S5")
+        strategy.cancel("S6")
+        strategy.close_all(comment="반대신호정리")
+
+// =====================================================
+// 거래중 익절 손절
+// =====================================================
+if cycleState == 3 and not na(basePrice) and not na(setupKtr) and filledSteps >= 1
+    stopPrice := basePrice - setupKtr * selectedStopKtr
+
+    float singleTp    = getSingleLongTp(basePrice, setupKtr)
+    float normalTp    = na
+    int   defenseStep = filledSteps > 2 ? filledSteps - 2 : 1
+    float defenseTp   = na
+
+    if filledSteps == 1
+        normalTp  := singleTp
+        defenseTp := singleTp
+    else
+        normalTp  := basePrice
+        defenseTp := getLongStepPrice(defenseStep)
+
+    if defenseMode
+        tpPrice := defenseTp
+    else
+        tpPrice := normalTp
+
+    strategy.exit("XL1", from_entry="L1", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XL2", from_entry="L2", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XL3", from_entry="L3", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XL4", from_entry="L4", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XL5", from_entry="L5", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XL6", from_entry="L6", stop=stopPrice, limit=tpPrice)
+
+if cycleState == -3 and not na(basePrice) and not na(setupKtr) and filledSteps >= 1
+    stopPrice := basePrice + setupKtr * selectedStopKtr
+
+    float singleTp    = getSingleShortTp(basePrice, setupKtr)
+    float normalTp    = na
+    int   defenseStep = filledSteps > 2 ? filledSteps - 2 : 1
+    float defenseTp   = na
+
+    if filledSteps == 1
+        normalTp  := singleTp
+        defenseTp := singleTp
+    else
+        normalTp  := basePrice
+        defenseTp := getShortStepPrice(defenseStep)
+
+    if defenseMode
+        tpPrice := defenseTp
+    else
+        tpPrice := normalTp
+
+    strategy.exit("XS1", from_entry="S1", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XS2", from_entry="S2", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XS3", from_entry="S3", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XS4", from_entry="S4", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XS5", from_entry="S5", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XS6", from_entry="S6", stop=stopPrice, limit=tpPrice)
+
+// =====================================================
+// 주문 체결 확인 — 롱
+// =====================================================
+if cycleState == 2 and strategy.position_size > 0
+    cycleState  := 3
+    activeSide  := "LONG"
+    basePrice   := strategy.position_avg_price
+
+    entry1Price := basePrice
+    entry2Price := maxAddStep >= 1 ? basePrice - setupKtr * 1 : na
+    entry3Price := maxAddStep >= 2 ? basePrice - setupKtr * 2 : na
+    entry4Price := maxAddStep >= 3 ? basePrice - setupKtr * 3 : na
+    entry5Price := maxAddStep >= 4 ? basePrice - setupKtr * 4 : na
+    entry6Price := maxAddStep >= 5 ? basePrice - setupKtr * 5 : na
+
+    filledSteps := 1
+    lastFillBar := bar_index
+    stopPrice   := basePrice - setupKtr * selectedStopKtr
+    tpPrice     := getSingleLongTp(basePrice, setupKtr)
+
+    if maxAddStep >= 1 and not na(qty2)
+        strategy.entry("L2", strategy.long, qty=qty2, limit=entry2Price)
+        step2Placed := true
+    if maxAddStep >= 2 and not na(qty3)
+        strategy.entry("L3", strategy.long, qty=qty3, limit=entry3Price)
+        step3Placed := true
+    if maxAddStep >= 3 and not na(qty4)
+        strategy.entry("L4", strategy.long, qty=qty4, limit=entry4Price)
+        step4Placed := true
+    if maxAddStep >= 4 and not na(qty5)
+        strategy.entry("L5", strategy.long, qty=qty5, limit=entry5Price)
+        step5Placed := true
+    if maxAddStep >= 5 and not na(qty6)
+        strategy.entry("L6", strategy.long, qty=qty6, limit=entry6Price)
+        step6Placed := true
+
+    if showLabels
+        label.new(
+             bar_index, low,
+             getModeName(activeTradeMode) + " " + getDirName(activeTradeDir) + "\n" +
+             str.tostring(longOnebiCount) + "번째 원비 첫진입\n" +
+             "진입가 " + str.tostring(basePrice, format.mintick) + "\n" +
+             "KTR " + str.tostring(setupKtr, format.mintick) + "\n" +
+             "최대추가 " + str.tostring(maxAddStep) + "\n" +
+             "적용시드 " + str.tostring(steppedCapital, format.mintick) + "\n" +
+             "적용리스크 " + str.tostring(entryRiskPctUsed, format.mintick) + "%\n" +
+             "총리스크 " + str.tostring(entryRiskUsdUsed, format.mintick),
+             style=label.style_label_up, color=color.aqua, textcolor=color.black, size=size.small)
+
+// =====================================================
+// 주문 체결 확인 — 숏
+// =====================================================
+if cycleState == -2 and strategy.position_size < 0
+    cycleState  := -3
+    activeSide  := "SHORT"
+    basePrice   := strategy.position_avg_price
+
+    entry1Price := basePrice
+    entry2Price := maxAddStep >= 1 ? basePrice + setupKtr * 1 : na
+    entry3Price := maxAddStep >= 2 ? basePrice + setupKtr * 2 : na
+    entry4Price := maxAddStep >= 3 ? basePrice + setupKtr * 3 : na
+    entry5Price := maxAddStep >= 4 ? basePrice + setupKtr * 4 : na
+    entry6Price := maxAddStep >= 5 ? basePrice + setupKtr * 5 : na
+
+    filledSteps := 1
+    lastFillBar := bar_index
+    stopPrice   := basePrice + setupKtr * selectedStopKtr
+    tpPrice     := getSingleShortTp(basePrice, setupKtr)
+
+    if maxAddStep >= 1 and not na(qty2)
+        strategy.entry("S2", strategy.short, qty=qty2, limit=entry2Price)
+        step2Placed := true
+    if maxAddStep >= 2 and not na(qty3)
+        strategy.entry("S3", strategy.short, qty=qty3, limit=entry3Price)
+        step3Placed := true
+    if maxAddStep >= 3 and not na(qty4)
+        strategy.entry("S4", strategy.short, qty=qty4, limit=entry4Price)
+        step4Placed := true
+    if maxAddStep >= 4 and not na(qty5)
+        strategy.entry("S5", strategy.short, qty=qty5, limit=entry5Price)
+        step5Placed := true
+    if maxAddStep >= 5 and not na(qty6)
+        strategy.entry("S6", strategy.short, qty=qty6, limit=entry6Price)
+        step6Placed := true
+
+    if showLabels
+        label.new(
+             bar_index, high,
+             getModeName(activeTradeMode) + " " + getDirName(activeTradeDir) + "\n" +
+             str.tostring(shortOnebiCount) + "번째 원비 첫진입\n" +
+             "진입가 " + str.tostring(basePrice, format.mintick) + "\n" +
+             "KTR " + str.tostring(setupKtr, format.mintick) + "\n" +
+             "최대추가 " + str.tostring(maxAddStep) + "\n" +
+             "적용시드 " + str.tostring(steppedCapital, format.mintick) + "\n" +
+             "적용리스크 " + str.tostring(entryRiskPctUsed, format.mintick) + "%\n" +
+             "총리스크 " + str.tostring(entryRiskUsdUsed, format.mintick),
+             style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+
+// =====================================================
+// 추가 체결 확인
+// =====================================================
+if cycleState == 3 and strategy.opentrades > filledSteps
+    filledSteps := strategy.opentrades
+    lastFillBar := bar_index
+    fillPrice   = strategy.opentrades.entry_price(filledSteps - 1)
+
+    if showLabels
+        label.new(
+             bar_index, low,
+             getModeName(activeTradeMode) + " " + getDirName(activeTradeDir) + "\n" +
+             "Step" + str.tostring(filledSteps) + " 체결\n" +
+             "진입가 " + str.tostring(fillPrice, format.mintick) + "\n" +
+             "KTR " + str.tostring(setupKtr, format.mintick),
+             style=label.style_label_up, color=color.aqua, textcolor=color.black, size=size.small)
+
+if cycleState == -3 and strategy.opentrades > filledSteps
+    filledSteps := strategy.opentrades
+    lastFillBar := bar_index
+    fillPrice   = strategy.opentrades.entry_price(filledSteps - 1)
+
+    if showLabels
+        label.new(
+             bar_index, high,
+             getModeName(activeTradeMode) + " " + getDirName(activeTradeDir) + "\n" +
+             "Step" + str.tostring(filledSteps) + " 체결\n" +
+             "진입가 " + str.tostring(fillPrice, format.mintick) + "\n" +
+             "KTR " + str.tostring(setupKtr, format.mintick),
+             style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+
+// =====================================================
+// 새 엔진
+// =====================================================
+canRearm = strategy.position_size == 0 and strategy.opentrades == 0 and cycleState != 2 and cycleState != -2 and (na(justClosedBar) or bar_index > justClosedBar)
+
+if canRearm
+    if goldenCross and lastCrossDir != 1
+        lastCrossDir      := 1
+        engineMode        := 1
+        engineDir         := 1
+        setupCount        := 0
+        cycleState        := 1
+        crossBar          := bar_index
+        longOnebiCount    := 0
+        shortOnebiCount   := 0
+        lastLongOnebiBar  := na
+        lastShortOnebiBar := na
+        bBreakArmed       := false
+        bBreakDir         := 0
+        bBreakBar         := na
+    else if deadCross and lastCrossDir != -1
+        lastCrossDir      := -1
+        engineMode        := 1
+        engineDir         := -1
+        setupCount        := 0
+        cycleState        := -1
+        crossBar          := bar_index
+        longOnebiCount    := 0
+        shortOnebiCount   := 0
+        lastLongOnebiBar  := na
+        lastShortOnebiBar := na
+        bBreakArmed       := false
+        bBreakDir         := 0
+        bBreakBar         := na
+
+// =====================================================
+// A모드 / 예외모드
+// [핵심 수정]
+// 원비는 골크/데크 후 전체 카운트 (박스 안팎 무관)
+// 진입은 박스 밖일 때만 실행
+// 카운트 3번 내에 박스 밖 진입 못하면 → A모드 종료 → B모드
+// =====================================================
+if canRearm and (engineMode == 1 or engineMode == 2)
+    allowedCount = engineMode == 1 ? maxRegularOnebi : maxReverseOnebi
+
+    // ── 롱 ──
+    if engineDir == 1 and cycleState == 1
+        // 원비 raw 신호 감지 (박스 조건 무관하게 카운트)
+        longOnebiRaw = buyCondition1 and (na(lastLongOnebiBar) or bar_index > lastLongOnebiBar)
+
+        if longOnebiRaw
+            lastLongOnebiBar := bar_index
+            setupCount       += 1
+            longOnebiCount   := setupCount
+
+            // 카운트 범위 내이고 + 박스 밖이면 → 진입
+            if setupCount <= allowedCount and isAboveTodayBox() and ktrReady and canEnterNewFlatPosition
+                setupKtr         := activeKtr
+                entryRiskPctUsed := getEntryRiskPct(1)
+                entryRiskUsdUsed := getEntryRiskUsd(1)
+                [_lq1, _lq2, _lq3, _lq4, _lq5, _lq6] = calcRiskSplitQtys(entryRiskUsdUsed, setupKtr, pointValue, maxAddStep, selectedStopKtr)
+                qty1 := _lq1
+                qty2 := _lq2
+                qty3 := _lq3
+                qty4 := _lq4
+                qty5 := _lq5
+                qty6 := _lq6
+
+                activeTradeMode    := engineMode
+                activeTradeDir     := engineDir
+                activeTradeSession := getCurrentSessionType()
+                strategy.entry("L1", strategy.long, qty=qty1)
+                cycleState := 2
+
+            // 카운트 소진 → B모드 전환
+            if setupCount >= allowedCount and cycleState != 2
+                engineMode  := 3
+                cycleState  := 1
+                bBreakArmed := false
+                bBreakDir   := 0
+                bBreakBar   := na
+
+    // ── 숏 ──
+    if engineDir == -1 and cycleState == -1
+        // 원비 raw 신호 감지 (박스 조건 무관하게 카운트)
+        shortOnebiRaw = sellCondition1 and (na(lastShortOnebiBar) or bar_index > lastShortOnebiBar)
+
+        if shortOnebiRaw
+            lastShortOnebiBar := bar_index
+            setupCount        += 1
+            shortOnebiCount   := setupCount
+
+            // 카운트 범위 내이고 + 박스 밖이면 → 진입
+            if setupCount <= allowedCount and isBelowTodayBox() and ktrReady and canEnterNewFlatPosition
+                setupKtr         := activeKtr
+                entryRiskPctUsed := getEntryRiskPct(-1)
+                entryRiskUsdUsed := getEntryRiskUsd(-1)
+                [_sq1, _sq2, _sq3, _sq4, _sq5, _sq6] = calcRiskSplitQtys(entryRiskUsdUsed, setupKtr, pointValue, maxAddStep, selectedStopKtr)
+                qty1 := _sq1
+                qty2 := _sq2
+                qty3 := _sq3
+                qty4 := _sq4
+                qty5 := _sq5
+                qty6 := _sq6
+
+                activeTradeMode    := engineMode
+                activeTradeDir     := engineDir
+                activeTradeSession := getCurrentSessionType()
+                strategy.entry("S1", strategy.short, qty=qty1)
+                cycleState := -2
+
+            // 카운트 소진 → B모드 전환
+            if setupCount >= allowedCount and cycleState != -2
+                engineMode  := 3
+                cycleState  := -1
+                bBreakArmed := false
+                bBreakDir   := 0
+                bBreakBar   := na
+
+// =====================================================
+// B모드
+// =====================================================
+if canRearm and engineMode == 3
+    bTrendDir = ma20 > ma120 ? 1 : ma20 < ma120 ? -1 : 0
+
+    if bTrendDir == 0
+        bBreakArmed := false
+        bBreakDir   := 0
+        bBreakBar   := na
+
+    if bTrendDir != 0 and (engineDir != bTrendDir or cycleState != (bTrendDir == 1 ? 1 : -1))
+        engineDir   := bTrendDir
+        cycleState  := bTrendDir == 1 ? 1 : -1
+        bBreakArmed := false
+        bBreakDir   := 0
+        bBreakBar   := na
+
+    // ── B모드 롱 ──
+    if bTrendDir == 1 and cycleState == 1
+        if boxDnBreak and bBreakArmed and bBreakDir == 1
+            bBreakArmed := false
+            bBreakDir   := 0
+            bBreakBar   := na
+
+        if boxUpBreak and not bUsedTodayLong
+            bBreakArmed := true
+            bBreakDir   := 1
+            bBreakBar   := bar_index
+
+        bLongOnebiRaw = bBreakArmed and
+             bBreakDir == 1 and
+             bar_index > nz(bBreakBar, bar_index) and
+             close > todayBoxTop and
+             buyCondition1 and
+             (na(lastLongOnebiBar) or bar_index > lastLongOnebiBar)
+
+        if bLongOnebiRaw
+            lastLongOnebiBar := bar_index
+            longOnebiCount   := 1
+            shortOnebiCount  := 0
+            bUsedTodayLong   := true
+            bBreakArmed      := false
+            bBreakDir        := 0
+            bBreakBar        := na
+
+            if ktrReady and canEnterNewFlatPosition
+                setupKtr         := activeKtr
+                entryRiskPctUsed := getEntryRiskPct(1)
+                entryRiskUsdUsed := getEntryRiskUsd(1)
+                [_blq1, _blq2, _blq3, _blq4, _blq5, _blq6] = calcRiskSplitQtys(entryRiskUsdUsed, setupKtr, pointValue, maxAddStep, selectedStopKtr)
+                qty1 := _blq1
+                qty2 := _blq2
+                qty3 := _blq3
+                qty4 := _blq4
+                qty5 := _blq5
+                qty6 := _blq6
+
+                activeTradeMode    := 3
+                activeTradeDir     := 1
+                activeTradeSession := getCurrentSessionType()
+                engineDir          := 1
+                strategy.entry("L1", strategy.long, qty=qty1)
+                cycleState := 2
+
+    // ── B모드 숏 ──
+    if bTrendDir == -1 and cycleState == -1
+        if boxUpBreak and bBreakArmed and bBreakDir == -1
+            bBreakArmed := false
+            bBreakDir   := 0
+            bBreakBar   := na
+
+        if boxDnBreak and not bUsedTodayShort
+            bBreakArmed := true
+            bBreakDir   := -1
+            bBreakBar   := bar_index
+
+        bShortOnebiRaw = bBreakArmed and
+             bBreakDir == -1 and
+             bar_index > nz(bBreakBar, bar_index) and
+             close < todayBoxBottom and
+             sellCondition1 and
+             (na(lastShortOnebiBar) or bar_index > lastShortOnebiBar)
+
+        if bShortOnebiRaw
+            lastShortOnebiBar := bar_index
+            shortOnebiCount   := 1
+            longOnebiCount    := 0
+            bUsedTodayShort   := true
+            bBreakArmed       := false
+            bBreakDir         := 0
+            bBreakBar         := na
+
+            if ktrReady and canEnterNewFlatPosition
+                setupKtr         := activeKtr
+                entryRiskPctUsed := getEntryRiskPct(-1)
+                entryRiskUsdUsed := getEntryRiskUsd(-1)
+                [_bsq1, _bsq2, _bsq3, _bsq4, _bsq5, _bsq6] = calcRiskSplitQtys(entryRiskUsdUsed, setupKtr, pointValue, maxAddStep, selectedStopKtr)
+                qty1 := _bsq1
+                qty2 := _bsq2
+                qty3 := _bsq3
+                qty4 := _bsq4
+                qty5 := _bsq5
+                qty6 := _bsq6
+
+                activeTradeMode    := 3
+                activeTradeDir     := -1
+                activeTradeSession := getCurrentSessionType()
+                engineDir          := -1
+                strategy.entry("S1", strategy.short, qty=qty1)
+                cycleState := -2
+
+// =====================================================
+// 디버그 표시
+// =====================================================
+plotchar(showDebug and goldenCross, "GC", "G", location=location.bottom, color=color.yellow)
+plotchar(showDebug and deadCross,   "DC", "D", location=location.top,    color=color.orange)
+plotchar(showDebug and cycleState == 1,  "LONG WAIT",     "L", location=location.bottom, color=color.lime)
+plotchar(showDebug and cycleState == -1, "SHORT WAIT",    "S", location=location.top,    color=color.red)
+plotchar(showDebug and cycleState == 2,  "LONG PENDING",  "P", location=location.bottom, color=color.aqua)
+plotchar(showDebug and cycleState == -2, "SHORT PENDING", "P", location=location.top,    color=color.orange)
+plotchar(showDebug and cycleState == 3,  "LONG ACTIVE",   "T", location=location.bottom, color=color.lime)
+plotchar(showDebug and cycleState == -3, "SHORT ACTIVE",  "T", location=location.top,    color=color.red)
+plotchar(showDebug and defenseMode and cycleState == 3,  "LONG DEFENSE",  "D", location=location.bottom, color=color.yellow)
+plotchar(showDebug and defenseMode and cycleState == -3, "SHORT DEFENSE", "D", location=location.top,    color=color.yellow)
+plotchar(showDebug and engineMode == 1, "A MODE", "A", location=location.bottom, color=color.white)
+plotchar(showDebug and engineMode == 2, "REV MODE", "R", location=location.bottom, color=color.fuchsia)
+plotchar(showDebug and engineMode == 3, "B MODE", "B", location=location.bottom, color=color.silver)
+plotchar(showDebug and boxUpReady, "BOX UP READY", "U", location=location.bottom, color=color.aqua)
+plotchar(showDebug and boxDnReady, "BOX DN READY", "D", location=location.top, color=color.orange)
+plotchar(showDebug and inFlatEntryBlock and isFlatNow, "ENTRY BLOCK", "B", location=location.bottom, color=color.fuchsia)
+plotchar(showDebug and ktrReady,         "KTR READY",  "K", location=location.bottom, color=color.lime)
+plotchar(showDebug and isAboveTodayBox(), "ABOVE BOX", "▲", location=location.bottom, color=color.orange)
+plotchar(showDebug and isBelowTodayBox(), "BELOW BOX", "▼", location=location.top,    color=color.red)
+
+plot(showDebug ? engineMode   : na, "dbg_engineMode",   color=color.white,   display=display.status_line)
+plot(showDebug ? cycleState   : na, "dbg_cycleState",   color=color.yellow,  display=display.status_line)
+plot(showDebug ? setupCount   : na, "dbg_setupCount",   color=color.aqua,    display=display.status_line)
+plot(showDebug ? lastCrossDir : na, "dbg_lastCrossDir", color=color.fuchsia, display=display.status_line)
+
+// =====================================================
+// 레벨 표시
+// =====================================================
+showActiveLevels = showLevels and (cycleState == 3 or cycleState == -3) and not na(basePrice)
+
+plot(showActiveLevels ? basePrice : na, "Base", color=color.white, linewidth=2, style=plot.style_linebr)
+plot(showActiveLevels and maxAddStep >= 1 ? entry2Price : na, "Step2", color=color.new(color.aqua, 10), linewidth=1, style=plot.style_linebr)
+plot(showActiveLevels and maxAddStep >= 2 ? entry3Price : na, "Step3", color=color.new(color.aqua, 25), linewidth=1, style=plot.style_linebr)
+plot(showActiveLevels and maxAddStep >= 3 ? entry4Price : na, "Step4", color=color.new(color.aqua, 40), linewidth=1, style=plot.style_linebr)
+plot(showActiveLevels and maxAddStep >= 4 ? entry5Price : na, "Step5", color=color.new(color.aqua, 55), linewidth=1, style=plot.style_linebr)
+plot(showActiveLevels and maxAddStep >= 5 ? entry6Price : na, "Step6", color=color.new(color.aqua, 70), linewidth=1, style=plot.style_linebr)
+plot(showActiveLevels ? stopPrice : na, "Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(showActiveLevels ? tpPrice : na, "TP", color=defenseMode ? color.yellow : color.lime, linewidth=2, style=plot.style_linebr)
+
+// =====================================================
+// 진입 전 원비 알람
+// =====================================================
+usePreEntryAlert = input.bool(true, "진입 전 원비 알람 사용", group="알림")
+
+newLongPending  = usePreEntryAlert and barstate.isconfirmed and cycleState == 2 and cycleState[1] != 2
+newShortPending = usePreEntryAlert and barstate.isconfirmed and cycleState == -2 and cycleState[1] != -2
+
+if newLongPending
+    alert(getModeName(activeTradeMode) + getDirName(1) + " " + str.tostring(longOnebiCount) + "번째원비", alert.freq_once_per_bar_close)
+
+if newShortPending
+    alert(getModeName(activeTradeMode) + getDirName(-1) + " " + str.tostring(shortOnebiCount) + "번째원비", alert.freq_once_per_bar_close)
