@@ -1205,8 +1205,3 @@ plot(showActiveLevels and maxAddStep >= 4 ? entry5Price : na, "Step5", color=col
 plot(showActiveLevels and maxAddStep >= 5 ? entry6Price : na, "Step6", color=color.new(color.aqua, 70), linewidth=1, style=plot.style_linebr)
 plot(showActiveLevels ? stopPrice : na, "Stop", color=color.red, linewidth=2, style=plot.style_linebr)
 plot(showActiveLevels ? tpPrice : na, "TP", color=defenseMode ? color.yellow : color.lime, linewidth=2, style=plot.style_linebr)
-
-// =====================================================
-// 진입 전 원비 알람
-// (alert은 각 진입 블록 내 strategy.entry() 직후에 위치)
-// =====================================================
