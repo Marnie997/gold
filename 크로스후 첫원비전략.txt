@@ -14,6 +14,7 @@ useReverseCleanup = input.bool(true, "반대방향정리 사용", group="전략"
 showLevels  = input.bool(true,  "체결 중 레벨 표시", group="전략")
 showLabels  = input.bool(true,  "체결 라벨 표시", group="전략")
 showDebug   = input.bool(false, "디버그 표시", group="전략")
+usePreEntryAlert = input.bool(true, "진입 전 원비 알람 사용", group="알림")
 
 selectedStopKtr = maxAddStep + 0.5
 
@@ -994,6 +995,9 @@ if canRearm and (engineMode == 1 or engineMode == 2)
                 activeTradeDir     := engineDir
                 activeTradeSession := getCurrentSessionType()
                 strategy.entry("L1", strategy.long, qty=qty1)
+                if usePreEntryAlert
+                    string alertModeName = engineMode == 1 ? "A모드" : "예외모드"
+                    alert(alertModeName + " 롱 " + str.tostring(longOnebiCount) + "번째 원비", alert.freq_once_per_bar_close)
                 cycleState := 2
 
             // 카운트 소진 → B모드 전환
@@ -1031,6 +1035,9 @@ if canRearm and (engineMode == 1 or engineMode == 2)
                 activeTradeDir     := engineDir
                 activeTradeSession := getCurrentSessionType()
                 strategy.entry("S1", strategy.short, qty=qty1)
+                if usePreEntryAlert
+                    string alertModeName = engineMode == 1 ? "A모드" : "예외모드"
+                    alert(alertModeName + " 숏 " + str.tostring(shortOnebiCount) + "번째 원비", alert.freq_once_per_bar_close)
                 cycleState := -2
 
             // 카운트 소진 → B모드 전환
@@ -1104,6 +1111,8 @@ if canRearm and engineMode == 3
                 activeTradeSession := getCurrentSessionType()
                 engineDir          := 1
                 strategy.entry("L1", strategy.long, qty=qty1)
+                if usePreEntryAlert
+                    alert("B모드 롱 1번째 원비", alert.freq_once_per_bar_close)
                 cycleState := 2
 
     // ── B모드 숏 ──
@@ -1151,6 +1160,8 @@ if canRearm and engineMode == 3
                 activeTradeSession := getCurrentSessionType()
                 engineDir          := -1
                 strategy.entry("S1", strategy.short, qty=qty1)
+                if usePreEntryAlert
+                    alert("B모드 숏 1번째 원비", alert.freq_once_per_bar_close)
                 cycleState := -2
 
 // =====================================================
@@ -1194,17 +1205,3 @@ plot(showActiveLevels and maxAddStep >= 4 ? entry5Price : na, "Step5", color=col
 plot(showActiveLevels and maxAddStep >= 5 ? entry6Price : na, "Step6", color=color.new(color.aqua, 70), linewidth=1, style=plot.style_linebr)
 plot(showActiveLevels ? stopPrice : na, "Stop", color=color.red, linewidth=2, style=plot.style_linebr)
 plot(showActiveLevels ? tpPrice : na, "TP", color=defenseMode ? color.yellow : color.lime, linewidth=2, style=plot.style_linebr)
-
-// =====================================================
-// 진입 전 원비 알람
-// =====================================================
-usePreEntryAlert = input.bool(true, "진입 전 원비 알람 사용", group="알림")
-
-newLongPending  = usePreEntryAlert and barstate.isconfirmed and cycleState == 2 and cycleState[1] != 2
-newShortPending = usePreEntryAlert and barstate.isconfirmed and cycleState == -2 and cycleState[1] != -2
-
-if newLongPending
-    alert(getModeName(activeTradeMode) + getDirName(1) + " " + str.tostring(longOnebiCount) + "번째원비", alert.freq_once_per_bar_close)
-
-if newShortPending
-    alert(getModeName(activeTradeMode) + getDirName(-1) + " " + str.tostring(shortOnebiCount) + "번째원비", alert.freq_once_per_bar_close)
